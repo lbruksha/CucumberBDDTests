@@ -1,0 +1,227 @@
+import org.apache.tools.ant.taskdefs.condition.Os
+
+group 'com.eodessa'
+version '2.0-SNAPSHOT'
+
+apply plugin: 'java'
+apply plugin: 'groovy'
+apply plugin: 'idea'
+apply plugin: 'project-report'
+
+def cucumberArgs = ((System.properties['cucumber.args'] ?: '--plugin html:output --glue src/test/groovy/com/eodessa src/test/resources') as String).split("\\s").collect { it.trim() }
+def seleniumVersion = '2.52.0'
+String browser = System.properties['browser'] ?: 'chrome' // can be chrome, or firefox 
+def chromeDriverBaseUrl = 'http://chromedriver.storage.googleapis.com'
+System.properties['chrome.driver.version'] = System.properties['chrome.driver.version'] ?: '2.33'
+
+repositories {
+    mavenCentral()
+    maven {url "http://central.maven.org/maven2"}
+    maven {url "http://repository.springsource.com/maven/bundles/release" }
+    maven {url "http://repository.springsource.com/maven/bundles/external" }
+    maven {url "https://maven.java.net/content/repositories/releases"}
+}
+
+configurations {
+    cucumberRuntime {
+        extendsFrom testRuntime
+    }
+}
+
+// https://docs.gradle.org/current/dsl/org.gradle.api.artifacts.ResolutionStrategy.html
+configurations.all{
+    resolutionStrategy {
+        failOnVersionConflict()
+        force 'com.fasterxml.jackson.core:jackson-databind:2.8.3'
+        force 'com.fasterxml.jackson.core:jackson-core:2.8.3'
+        force 'org.codehaus.groovy:groovy-all:2.4.11'
+        force 'org.yaml:snakeyaml:1.15'
+        force 'junit:junit:4.12'
+        force 'commons-logging:commons-logging:1.2'
+        force 'org.apache.httpcomponents:httpclient:4.5.2'
+        force 'org.apache.commons:commons-lang3:3.4'
+        force 'commons-codec:commons-codec:1.9'
+        force 'com.google.guava:guava:19.0'
+        force 'xml-apis:xml-apis:1.4.01'
+        force 'org.slf4j:slf4j-api:1.7.16'
+        force 'commons-beanutils:commons-beanutils:1.9.2'
+        force 'commons-io:commons-io:2.4'
+    }
+}
+dependencies {
+    compile 'com.googlecode.libphonenumber:libphonenumber:8.0.1'
+    compile 'io.rest-assured:rest-assured:3.0.0'
+    compile group: 'com.jayway.jsonpath', name: 'json-path', version: '2.2.0'
+    compile group: 'com.fasterxml.jackson.core', name: 'jackson-databind', version: '2.8.3'
+    compile group: 'commons-beanutils', name: 'commons-beanutils', version: '1.9.2'
+    compile group: 'org.yaml', name: 'snakeyaml', version: '1.8'
+    compile 'mysql:mysql-connector-java:5.1.36'
+    compile 'com.jcraft:jsch:0.1.53'
+    compile 'joda-time:joda-time:2.3'
+    compile 'org.apache.poi:poi-ooxml:3.9'
+    compile 'org.freemarker:freemarker:2.3.23'
+
+    testCompile 'info.cukes:cucumber-junit:1.2.5'
+    testCompile 'org.codehaus.groovy:groovy-all:2.4.11'
+    testCompile 'info.cukes:cucumber-groovy:1.2.5'
+    testCompile 'org.gebish:geb-core:1.1.1'
+    testCompile 'org.testng:testng:6.9.6'
+    testCompile "org.seleniumhq.selenium:selenium-firefox-driver:$seleniumVersion"
+    testCompile "org.seleniumhq.selenium:selenium-chrome-driver:$seleniumVersion"
+    testCompile "org.seleniumhq.selenium:selenium-support:$seleniumVersion"
+
+    compile 'com.google.api-client:google-api-client:1.22.0'
+    compile 'com.google.oauth-client:google-oauth-client-jetty:1.22.0'
+    compile 'com.google.apis:google-api-services-sheets:v4-rev483-1.22.0'
+
+}
+
+static def chromeOs() {
+    [win: Os.FAMILY_WINDOWS, mac: Os.FAMILY_MAC, linux: Os.FAMILY_UNIX].find { Os.isFamily(it.value) }.key
+}
+
+static boolean isLinux() {
+    Os.isFamily(Os.FAMILY_UNIX) && !Os.isFamily(Os.FAMILY_MAC)
+}
+
+static def chromeArch() {
+    if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+        return "32"
+    }
+    if (Os.isFamily(Os.FAMILY_MAC) &&
+            (System.properties['chrome.driver.version'] as String).toDouble() < 2.23) {
+        return "32"
+    }
+    System.properties['os.arch'].indexOf("64") == -1 ? "32" : "64"
+}
+
+static File chromeDriverDir() { driverDir(".chromedriver") }
+
+static File driverDir(String dirName) {
+    def dir = new File(System.properties['user.home'] as String, dirName)
+    if (!dir.exists()) {
+        if (!dir.mkdirs()) {
+            throw new RuntimeException(
+                    "Failed to create driver directory @ ${dir.absolutePath}. ")
+        }
+    }
+    dir
+}
+
+static File chromeDriverZipFile() { new File(chromeDriverDir(), "chromedriver.zip") }
+
+static File chromeDriverFile() { driverFile('chromedriver', 'chrome.driver.version', chromeDriverDir()) }
+
+static File driverFile(String driverName, String driverVersionProperty, File driverDir) {
+    new File(driverDir,
+            "${driverName}_${System.properties[driverVersionProperty].replace('.', '_')}" +
+                    (Os.isFamily(Os.FAMILY_WINDOWS) ? '.exe' : ''))
+}
+
+static File getDriverBinary(String browser, File driverFile) {
+    return driverFile
+}
+
+static installDriverFileIfNotInstalled(
+        String browserName,
+        File driverFile,
+        File driverZipFile,
+        URL driverUrl,
+        AntBuilder ant) {
+
+    if (driverFile.exists() && driverFile.canExecute()) {
+        println("${browserName.capitalize()} driver already installed")
+        return
+    }
+    // remove old drivers
+    driverFile.parentFile.eachFile { it.delete() }
+
+    println("Downloading $browserName driver from $driverUrl")
+
+    try {
+        ant.get(src: driverUrl.toString(), dest: driverZipFile)
+    } catch(SocketException e) {
+        println("Failed to download $browserName from $driverUrl. ")
+        throw e
+    }
+
+    if (driverZipFile.name.endsWith('zip')) {
+        ant.unzip(src: driverZipFile.absolutePath, dest: driverZipFile.parent, overwrite: 'true')
+    } else {
+        ant.untar(src: driverZipFile.absolutePath, dest: driverZipFile.parent, compression: 'bzip2')
+    }
+    driverZipFile.delete()
+
+    def file = driverFile.parentFile.listFiles().find { it.name.contains(browserName) }
+    assert file != null
+    file.renameTo(driverFile)
+
+    def binary = getDriverBinary(browserName, driverFile)
+    if (!binary.setExecutable(true)) {
+        throw new RuntimeException(
+                "Could not make the $browserName driver ${binary.absolutePath} executable.")
+    }
+}
+
+task installChromeDriverIfNotInstalled() {
+    doLast {
+        String driverVersion = System.properties['chrome.driver.version'] as String
+        String chromeDriver = "chromedriver_${chromeOs()}${chromeArch()}.zip"
+        installDriverFileIfNotInstalled(
+                "chrome",
+                chromeDriverFile(),
+                chromeDriverZipFile(),
+                new URL("$chromeDriverBaseUrl/${driverVersion}/$chromeDriver"),
+                ant)
+    }
+}
+
+task addWebDriverProperties() {
+    doLast {
+        ["webdriver.chrome.driver": chromeDriverFile().absolutePath,
+         "geb.driver"             : getWebDriver(browser)].each {
+            System.properties[it.key] = it.value
+        }
+    }
+}
+
+static String getWebDriver(String browser) {
+    return browser
+}
+
+task cucumber() {
+    dependsOn compileTestGroovy, assemble, installChromeDriverIfNotInstalled, addWebDriverProperties
+
+    doLast {
+        javaexec {
+            main = "cucumber.api.cli.Main"
+            classpath = configurations.cucumberRuntime + sourceSets.main.output + sourceSets.test.output
+            args = cucumberArgs
+            systemProperties = System.properties
+
+            String debugArgs = ""
+            if (System.properties['cucumber.remote.debug.port']){
+                String debugPort = System.properties['cucumber.remote.debug.port']
+                debugArgs = "-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=$debugPort"
+                jvmArgs = ["$debugArgs"]
+            }
+        }
+    }
+}
+test {
+    // enable TestNG support (default is JUnit)
+    useTestNG() {
+        excludeGroups 'integration.*', 'integrity', 'draft', 'setupClient'
+        useDefaultListeners = true
+    }
+    ignoreFailures = true
+    // set heap size for the test JVM(s)
+    minHeapSize = "128m"
+    maxHeapSize = "512m"
+    // set JVM arguments for the test JVM(s)
+    jvmArgs '-XX:MaxPermSize=256m'
+    // listen to events in the test execution lifecycle
+    beforeTest { descriptor ->
+        logger.lifecycle("Running test: " + descriptor)
+    }
+}
